@@ -1,16 +1,19 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-亚马逊外箱面单自动化处理 - 极简极致纯净版 (偏好 B)
-特点：
-1. 胶囊与弹窗合二为一：点击绿色表名胶囊可展开临时换表
-2. 批量处理：支持同时拖入多个面单，自动打包 ZIP
-3. 极致纯净：处理完成后只显示醒目的下载按钮，所有指标卡和明细大表默认折叠隐藏
+亚马逊外箱面单自动化处理 - 特殊项映射字典版
+特性：
+1. 双极简隐藏胶囊：
+   - 绿色胶囊：自动检索商品库（点击可临时更换）
+   - 闪电胶囊：特殊项 SKU 字典（点击可配置面单SKU与商品表SKU映射）
+2. 批量处理：支持拖拽多个面单，自动打包 ZIP
+3. 纯净视图：处理后仅保留下载按钮，数据与明细默认折叠隐藏
 """
 
 import os
 import io
 import re
+import json
 import zipfile
 import warnings
 from datetime import datetime
@@ -31,7 +34,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # ==============================================================================
-# 0. 极简页面配置与样式定制
+# 0. 极简页面样式与字体
 # ==============================================================================
 st.set_page_config(
     page_title="外箱面单批量处理",
@@ -39,22 +42,19 @@ st.set_page_config(
     layout="centered"
 )
 
-# 定制 CSS：隐藏多余组件并将弹窗按钮做成极简圆角状态胶囊
 st.markdown("""
 <style>
-/* 隐藏 Streamlit 默认顶部菜单与页脚 */
 #MainMenu {visibility: hidden;}
 header {visibility: hidden;}
 footer {visibility: hidden;}
 
-/* 内容居中宽度 */
 .block-container {
     padding-top: 2.2rem;
     padding-bottom: 2rem;
     max-width: 720px;
 }
 
-/* 将 Popover 按钮样式伪装成圆角胶囊 */
+/* 将所有 Popover 按钮统一修饰为极简圆角状态胶囊 */
 div[data-testid="stPopover"] > button {
     border-radius: 20px !important;
     padding: 4px 14px !important;
@@ -82,19 +82,14 @@ div[data-testid="stPopover"] > button:focus {
 </style>
 """, unsafe_allow_html=True)
 
-# 中文字体探测与注册
 DEFAULT_FONT = "Helvetica"
 FONT_SEARCH_PATHS = [
-    # Linux (Streamlit Cloud: packages.txt 中安装 fonts-wqy-microhei)
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    # 本地目录
     "simhei.ttf",
     "wqy-microhei.ttc",
-    # Windows
     r"C:\Windows\Fonts\simhei.ttf",
     r"C:\Windows\Fonts\msyh.ttc",
-    # macOS
     "/System/Library/Fonts/PingFang.ttc",
 ]
 
@@ -109,7 +104,45 @@ for fpath in FONT_SEARCH_PATHS:
 
 
 # ==============================================================================
-# 1. 商品表处理与正则提取
+# 1. 特殊项映射字典管理 (本地持久化保存)
+# ==============================================================================
+MAPPING_FILE = "sku_mapping.json"
+
+def load_sku_mapping() -> Dict[str, str]:
+    """从本地 json 文件加载映射字典"""
+    if os.path.exists(MAPPING_FILE):
+        try:
+            with open(MAPPING_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_sku_mapping(mapping: Dict[str, str]) -> None:
+    """持久化保存到本地 json"""
+    try:
+        with open(MAPPING_FILE, "w", encoding="utf-8") as f:
+            json.dump(mapping, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def parse_mapping_text(text: str) -> Dict[str, str]:
+    """解析文本输入：支持冒号、等号、箭头、制表符等分隔符"""
+    mapping = {}
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = re.split(r'\s*(?:->|=>|[:=,\t])\s*', line, maxsplit=1)
+        if len(parts) == 2:
+            src, target = parts[0].strip(), parts.strip()
+            if src and target:
+                mapping[src] = target
+    return mapping
+
+
+# ==============================================================================
+# 2. 商品库查找与提取逻辑
 # ==============================================================================
 
 def find_latest_commodities_file(directory: str = ".") -> Optional[Dict[str, Any]]:
@@ -163,7 +196,12 @@ def load_commodities_df(source: Any) -> Optional[pd.DataFrame]:
         return None
 
 
-def get_sku_info_from_df(sku: str, df: Optional[pd.DataFrame]) -> dict:
+def get_sku_info_from_df(sku: str, df: Optional[pd.DataFrame], sku_mapping: Optional[Dict[str, str]] = None) -> dict:
+    # 核心：如果命中特殊项字典，先转换为商品库对应的真实 SKU
+    lookup_sku = sku
+    if sku_mapping and sku in sku_mapping:
+        lookup_sku = sku_mapping[sku]
+
     if df is None:
         return {"product": "未找到商品库", "brand": "请检查表格"}
 
@@ -174,9 +212,14 @@ def get_sku_info_from_df(sku: str, df: Optional[pd.DataFrame]) -> dict:
     if not col_sku or not col_product or not col_brand:
         return {"product": "表格列缺失", "brand": "缺少SKU/品名/品牌"}
 
-    match = df[df[col_sku].astype(str).str.strip() == sku.strip()]
+    # 先用映射后的 lookup_sku 检索
+    match = df[df[col_sku].astype(str).str.strip() == lookup_sku.strip()]
     if match.empty:
-        return {"product": "未匹配到SKU", "brand": "请更新商品库"}
+        # 如果未匹配且有映射过，再用原始面单 SKU 兜底检索一次
+        if lookup_sku != sku:
+            match = df[df[col_sku].astype(str).str.strip() == sku.strip()]
+        if match.empty:
+            return {"product": "未匹配到SKU", "brand": "请更新商品库"}
 
     product = str(match[col_product].values[0]) if pd.notna(match[col_product].values[0]) else ""
     brand = str(match[col_brand].values[0]) if pd.notna(match[col_brand].values[0]) else ""
@@ -211,7 +254,7 @@ def extract_warehouse_from_text(text: str) -> str:
 
 
 # ==============================================================================
-# 2. 分隔页生成与 PDF 组装
+# 3. 分隔页绘制与面单重排处理
 # ==============================================================================
 
 def add_sku_label_page(
@@ -224,7 +267,6 @@ def add_sku_label_page(
     packet = io.BytesIO()
     c = canvas.Canvas(packet, pagesize=(283.46, 283.46))
 
-    # 边框装饰
     c.setStrokeColorRGB(0.75, 0.75, 0.75)
     c.rect(12, 12, 283.46 - 24, 283.46 - 24)
 
@@ -265,7 +307,8 @@ def add_sku_label_page(
 
 def process_single_pdf_bytes(
     pdf_file_bytes: bytes,
-    commodities_df: Optional[pd.DataFrame]
+    commodities_df: Optional[pd.DataFrame],
+    sku_mapping: Optional[Dict[str, str]] = None
 ) -> Tuple[bytes, Dict[str, Any], List[Dict[str, Any]]]:
     sku_counts = defaultdict(int)
     sku_pages = defaultdict(list)
@@ -293,7 +336,7 @@ def process_single_pdf_bytes(
     for sku, pages in sku_pages.items():
         count = sku_counts[sku]
         warehouse = warehouse_info.get(sku, None)
-        info = get_sku_info_from_df(sku, commodities_df)
+        info = get_sku_info_from_df(sku, commodities_df, sku_mapping=sku_mapping)
 
         table_data.append({
             "SKU": sku,
@@ -302,13 +345,10 @@ def process_single_pdf_bytes(
             "数量": f"{count} 箱"
         })
 
-        # 头部分隔页
         add_sku_label_page(writer, sku, count, warehouse, info)
-        # 每箱面单复制两份
         for p in pages:
             writer.add_page(reader.pages[p])
             writer.add_page(reader.pages[p])
-        # 尾部分隔页
         add_sku_label_page(writer, sku, count, warehouse, info)
 
     out_buf = io.BytesIO()
@@ -324,46 +364,77 @@ def process_single_pdf_bytes(
 
 
 # ==============================================================================
-# 3. Streamlit 主页面
+# 4. Streamlit 主页面
 # ==============================================================================
 
 def main():
-    # 顶部标题
     st.subheader("📦 亚马逊外箱面单批量处理")
 
-    # 1. 自动检索本地商品表
+    # 1. 加载特殊映射字典（优先 session_state，其次磁盘文件）
+    if "sku_mapping" not in st.session_state:
+        st.session_state["sku_mapping"] = load_sku_mapping()
+    current_mapping = st.session_state["sku_mapping"]
+
+    # 2. 定位商品库文件与胶囊文案
     auto_commodities = find_latest_commodities_file(".")
-
-    # 2. 状态胶囊文案计算
     custom_uploaded = st.session_state.get("custom_commodities", None)
-    if custom_uploaded is not None:
-        pill_label = f"🟢 自定义: {custom_uploaded.name} ▾"
-    elif auto_commodities:
-        pill_label = f"🟢 {auto_commodities['filename']} ▾"
-    else:
-        pill_label = "🔴 未检测到商品库 (点击上传) ▾"
 
-    # 3. 胶囊即按钮：点击展开隐藏换表弹窗
-    with st.popover(pill_label):
-        st.caption("如需临时覆盖或更换商品库，请在此上传：")
-        custom_file = st.file_uploader(
-            "上传替代商品列表",
-            type=["xlsx", "xls", "csv"],
-            label_visibility="collapsed",
-            key="custom_commodities"
-        )
-        if custom_uploaded is not None and st.button("恢复使用默认商品库", use_container_width=True):
-            del st.session_state["custom_commodities"]
-            st.rerun()
+    if custom_uploaded is not None:
+        table_pill_label = f"🟢 自定义: {custom_uploaded.name} ▾"
+    elif auto_commodities:
+        table_pill_label = f"🟢 {auto_commodities['filename']} ▾"
+    else:
+        table_pill_label = "🔴 未检测到商品库 (点击上传) ▾"
+
+    map_count = len(current_mapping)
+    mapping_pill_label = f"⚡ 特殊映射 ({map_count}条) ▾" if map_count > 0 else "⚡ 特殊映射 ▾"
+
+    # 3. 顶部并排双胶囊弹窗
+    col_p1, col_p2, _ = st.columns([1.6, 1.1, 1.3])
+
+    with col_p1:
+        with st.popover(table_pill_label):
+            st.caption("如需临时覆盖或更换商品库，请在此上传：")
+            custom_file = st.file_uploader(
+                "上传替代商品列表",
+                type=["xlsx", "xls", "csv"],
+                label_visibility="collapsed",
+                key="custom_commodities"
+            )
+            if custom_uploaded is not None and st.button("恢复默认表格", use_container_width=True):
+                del st.session_state["custom_commodities"]
+                st.rerun()
+
+    with col_p2:
+        with st.popover(mapping_pill_label):
+            st.caption("配置【面单SKU】与【商品库SKU】对应关系（每行一条）：")
+            existing_text = "\n".join(f"{k} : {v}" for k, v in current_mapping.items())
+            user_input = st.text_area(
+                "映射规则",
+                value=existing_text,
+                placeholder="例如：\nMACG001RD6 : MACG001RD-6\n面单SKU : 商品库真实SKU",
+                height=130,
+                label_visibility="collapsed"
+            )
+            c_btn1, c_btn2 = st.columns(2)
+            if c_btn1.button("保存规则", type="primary", use_container_width=True):
+                new_map = parse_mapping_text(user_input)
+                st.session_state["sku_mapping"] = new_map
+                save_sku_mapping(new_map)
+                st.rerun()
+            if c_btn2.button("清空规则", use_container_width=True):
+                st.session_state["sku_mapping"] = {}
+                save_sku_mapping({})
+                st.rerun()
 
     # 4. 判定生效的商品库
     active_df = None
-    if custom_file is not None:
-        active_df = load_commodities_df(custom_file)
+    if custom_uploaded is not None:
+        active_df = load_commodities_df(custom_uploaded)
     elif auto_commodities:
         active_df = load_commodities_df(auto_commodities["path"])
 
-    # 5. 核心操作区：批量面单拖拽
+    # 5. 主操作区：批量面单拖拽
     uploaded_pdfs = st.file_uploader(
         "拖拽或点击上传一个或多个亚马逊面单 PDF",
         type=["pdf"],
@@ -392,7 +463,8 @@ def main():
                 try:
                     res_bytes, summary, table_data = process_single_pdf_bytes(
                         pdf_file.getvalue(),
-                        active_df
+                        active_df,
+                        sku_mapping=current_mapping
                     )
                     base_name = os.path.splitext(pdf_file.name)[0]
                     out_filename = f"{base_name}-优化.pdf"
@@ -418,7 +490,7 @@ def main():
             status_txt.empty()
 
             if processed_results:
-                # ----------------- 【核心：只突出显示下载按钮】 -----------------
+                # 只保留核心下载按钮
                 if num_files == 1:
                     single = processed_results[0]
                     st.download_button(
@@ -430,7 +502,6 @@ def main():
                         use_container_width=True
                     )
                 else:
-                    # 多文件打 ZIP 包
                     zip_buffer = io.BytesIO()
                     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                         for item in processed_results:
@@ -449,7 +520,7 @@ def main():
                         use_container_width=True
                     )
 
-                # ----------------- 【偏好 B：统计数字与大表全部默认隐藏】 -----------------
+                # 偏好 B：统计数字与大表全部默认折叠隐藏
                 with st.expander("📊 查看处理数据与明细 (点击展开)"):
                     distinct_skus = len(set(r["SKU"] for r in all_table_data))
                     c1, c2, c3, c4 = st.columns(4)
@@ -464,7 +535,7 @@ def main():
                         display_cols = [c for c in cols if c in df_display.columns]
                         st.dataframe(df_display[display_cols], use_container_width=True, hide_index=True)
 
-                # 多文件时可展开独立下载某个面单
+                # 多文件独立单面单下载展开框
                 if num_files > 1:
                     with st.expander("📄 展开单独下载某个面单"):
                         for item in processed_results:
