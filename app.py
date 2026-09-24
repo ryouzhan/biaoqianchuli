@@ -371,7 +371,7 @@ def process_single_pdf_bytes(
 # ==============================================================================
 
 def main():
-    st.subheader("📦 亚马逊外箱面单批量处理")
+    st.subheader("📦 亚马逊面单批量处理工具 By Ryou")
 
     # 1. 加载特殊映射字典
     if "sku_mapping" not in st.session_state:
