@@ -1,10 +1,11 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-亚马逊外箱面单自动化处理 - 批量处理 + 双引擎自适应极简版
-依赖：
-  基础依赖：pip install pypdf reportlab pandas openpyxl streamlit
-  可选加速：pip install pymupdf (若安装则自动启用极速模式)
+亚马逊外箱面单自动化处理 - 胶囊一体化极简版
+功能：
+1. 自动检测最新商品库，点击胶囊可直接呼出隐藏换表弹窗
+2. 支持单文件 / 多文件批量拖拽处理
+3. 单文件直接下载优化后的 PDF，多文件自动打包为 ZIP 供一键下载
 """
 
 import os
@@ -19,84 +20,88 @@ from collections import defaultdict
 import streamlit as st
 import pandas as pd
 
-# 检查是否存在 PyMuPDF (fitz)
-USE_FITZ = False
+# 双兼容导入 PDF 读写库
 try:
-    import pymupdf as fitz
-    USE_FITZ = True
+    from pypdf import PdfReader, PdfWriter
 except ImportError:
-    try:
-        import fitz
-        USE_FITZ = True
-    except ImportError:
-        USE_FITZ = False
+    from PyPDF2 import PdfReader, PdfWriter
 
-# 基础纯 Python PDF 库兜底
-from pypdf import PdfReader, PdfWriter
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # ==============================================================================
-# 0. 极简样式与字体加载
+# 0. 极简页面配置与样式定制
 # ==============================================================================
 st.set_page_config(
     page_title="外箱面单批量处理",
-    page_icon="??",
+    page_icon="📦",
     layout="centered"
 )
 
+# 注入 CSS：将 st.popover 按钮定制为极简圆角状态胶囊
 st.markdown("""
 <style>
+/* 隐藏 Streamlit 默认顶部与页脚 */
 #MainMenu {visibility: hidden;}
 header {visibility: hidden;}
 footer {visibility: hidden;}
+
+/* 内容居中与宽度约束 */
 .block-container {
     padding-top: 2.2rem;
     padding-bottom: 2rem;
     max-width: 720px;
 }
-.status-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 5px 14px;
-    border-radius: 20px;
-    font-size: 0.82rem;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.12);
-    color: #94a3b8;
-    margin-top: 2px;
-    margin-bottom: 12px;
-}
-.dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
-.dot-green { background-color: #10b981; box-shadow: 0 0 6px #10b981; }
-.dot-red { background-color: #ef4444; box-shadow: 0 0 6px #ef4444; }
+
+/* 核心：将 Popover 按钮伪装成极简圆角状态胶囊 */
 div[data-testid="stPopover"] > button {
-    border-radius: 16px;
-    padding: 2px 10px;
-    font-size: 0.8rem;
-    height: 30px;
+    border-radius: 20px !important;
+    padding: 4px 14px !important;
+    font-size: 0.82rem !important;
+    background: rgba(255, 255, 255, 0.05) !important;
+    border: 1px solid rgba(255, 255, 255, 0.12) !important;
+    color: #94a3b8 !important;
+    height: auto !important;
+    margin-top: 2px !important;
+    margin-bottom: 16px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    transition: all 0.2s ease;
+}
+
+/* 鼠标悬停时微亮 */
+div[data-testid="stPopover"] > button:hover {
+    border-color: rgba(255, 255, 255, 0.28) !important;
+    background: rgba(255, 255, 255, 0.09) !important;
+    color: #e2e8f0 !important;
+}
+
+/* 去除默认 popover 按钮内的多余轮廓 */
+div[data-testid="stPopover"] > button:focus {
+    box-shadow: none !important;
 }
 </style>
 """, unsafe_allow_html=True)
 
+# 中文字体探测与注册
 DEFAULT_FONT = "Helvetica"
 FONT_SEARCH_PATHS = [
+    # Linux (Streamlit Cloud Debian: packages.txt 中安装 fonts-wqy-microhei)
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    # 本地目录
     "simhei.ttf",
     "wqy-microhei.ttc",
+    # Windows
     r"C:\Windows\Fonts\simhei.ttf",
     r"C:\Windows\Fonts\msyh.ttc",
-    r"C:\Windows\Fonts\simsun.ttc",
+    # macOS
     "/System/Library/Fonts/PingFang.ttc",
 ]
 
-CHINESE_FONT_PATH = None
 for fpath in FONT_SEARCH_PATHS:
     if os.path.exists(fpath):
-        CHINESE_FONT_PATH = fpath
         try:
             pdfmetrics.registerFont(TTFont("ChineseFont", fpath))
             DEFAULT_FONT = "ChineseFont"
@@ -124,7 +129,6 @@ def find_latest_commodities_file(directory: str = ".") -> Optional[Dict[str, Any
                 mtime = os.path.getmtime(full_path)
                 date_matches = re.findall(r'\b20\d{6,8}\b|\b20\d{2}[-_]\d{2}[-_]\d{2}\b', fname)
                 date_score = int(re.sub(r'[-_]', '', date_matches[-1])) if date_matches else 0
-
                 candidates.append({
                     "path": full_path,
                     "filename": fname,
@@ -143,10 +147,20 @@ def load_commodities_df(source: Any) -> Optional[pd.DataFrame]:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             if isinstance(source, str):
-                return pd.read_csv(source) if source.lower().endswith(".csv") else pd.read_excel(source)
+                if source.lower().endswith(".csv"):
+                    try:
+                        return pd.read_csv(source, encoding="utf-8-sig")
+                    except Exception:
+                        return pd.read_csv(source, encoding="gbk")
+                return pd.read_excel(source)
             else:
                 is_csv = getattr(source, "name", "").lower().endswith(".csv")
-                return pd.read_csv(source) if is_csv else pd.read_excel(source)
+                if is_csv:
+                    try:
+                        return pd.read_csv(source, encoding="utf-8-sig")
+                    except Exception:
+                        return pd.read_csv(source, encoding="gbk")
+                return pd.read_excel(source)
     except Exception:
         return None
 
@@ -199,10 +213,10 @@ def extract_warehouse_from_text(text: str) -> str:
 
 
 # ==============================================================================
-# 2. 核心处理引擎（支持 PyMuPDF 极速模式，自动降级纯 pypdf）
+# 2. 面单分隔页绘制与排版逻辑
 # ==============================================================================
 
-def add_sku_label_page_reportlab(
+def add_sku_label_page(
     writer: PdfWriter,
     sku: str,
     count: int,
@@ -255,156 +269,100 @@ def process_single_pdf_bytes(
     pdf_file_bytes: bytes,
     commodities_df: Optional[pd.DataFrame]
 ) -> Tuple[bytes, Dict[str, Any], List[Dict[str, Any]]]:
-    """处理单个 PDF 字节流，支持根据环境自适应"""
     sku_counts = defaultdict(int)
     sku_pages = defaultdict(list)
     warehouse_info = defaultdict(str)
 
-    # 优先采用 PyMuPDF (如果可用)
-    if USE_FITZ:
-        src_doc = fitz.open(stream=pdf_file_bytes, filetype="pdf")
-        total_pages = len(src_doc)
-        for i in range(total_pages):
-            text = src_doc[i].get_text() or ""
-            if not text:
-                continue
-            sku = extract_sku_from_text(text)
-            if not sku or sku == "未知SKU":
-                continue
-            warehouse = extract_warehouse_from_text(text)
-            if warehouse != "未知仓库":
-                warehouse_info[sku] = warehouse
-            sku_counts[sku] += 1
-            sku_pages[sku].append(i)
+    reader = PdfReader(io.BytesIO(pdf_file_bytes))
+    total_pages = len(reader.pages)
 
-        out_doc = fitz.open()
-        table_data = []
-        for sku, pages in sku_pages.items():
-            count = sku_counts[sku]
-            warehouse = warehouse_info.get(sku, None)
-            info = get_sku_info_from_df(sku, commodities_df)
-            table_data.append({
-                "SKU": sku,
-                "品名": info["product"],
-                "工厂/品牌": info["brand"],
-                "数量": f"{count} 箱",
-                "箱数数值": count
-            })
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text() or ""
+        if not text:
+            continue
+        sku = extract_sku_from_text(text)
+        if not sku or sku == "未知SKU":
+            continue
+        warehouse = extract_warehouse_from_text(text)
+        if warehouse != "未知仓库":
+            warehouse_info[sku] = warehouse
+        sku_counts[sku] += 1
+        sku_pages[sku].append(i)
 
-            # 用 reportlab 生成分隔页，再由 fitz 读取插入
-            sep_writer = PdfWriter()
-            add_sku_label_page_reportlab(sep_writer, sku, count, warehouse, info)
-            sep_bytes = io.BytesIO()
-            sep_writer.write(sep_bytes)
-            sep_bytes.seek(0)
-            sep_fitz = fitz.open(stream=sep_bytes.getvalue(), filetype="pdf")
+    writer = PdfWriter()
+    table_data = []
 
-            out_doc.insert_pdf(sep_fitz)
-            for p in pages:
-                out_doc.insert_pdf(src_doc, from_page=p, to_page=p)
-                out_doc.insert_pdf(src_doc, from_page=p, to_page=p)
-            out_doc.insert_pdf(sep_fitz)
-            sep_fitz.close()
+    for sku, pages in sku_pages.items():
+        count = sku_counts[sku]
+        warehouse = warehouse_info.get(sku, None)
+        info = get_sku_info_from_df(sku, commodities_df)
 
-        out_bytes = out_doc.tobytes(deflate=True, garbage=3)
-        out_page_count = len(out_doc)
-        src_doc.close()
-        out_doc.close()
+        table_data.append({
+            "SKU": sku,
+            "品名": info["product"],
+            "工厂/品牌": info["brand"],
+            "数量": f"{count} 箱"
+        })
 
-    else:
-        # 降级模式：纯 pypdf + reportlab（无需安装任何 C 库）
-        reader = PdfReader(io.BytesIO(pdf_file_bytes))
-        total_pages = len(reader.pages)
-        for i, page in enumerate(reader.pages):
-            text = page.extract_text() or ""
-            if not text:
-                continue
-            sku = extract_sku_from_text(text)
-            if not sku or sku == "未知SKU":
-                continue
-            warehouse = extract_warehouse_from_text(text)
-            if warehouse != "未知仓库":
-                warehouse_info[sku] = warehouse
-            sku_counts[sku] += 1
-            sku_pages[sku].append(i)
+        add_sku_label_page(writer, sku, count, warehouse, info)
+        for p in pages:
+            writer.add_page(reader.pages[p])
+            writer.add_page(reader.pages[p])
+        add_sku_label_page(writer, sku, count, warehouse, info)
 
-        writer = PdfWriter()
-        table_data = []
-        for sku, pages in sku_pages.items():
-            count = sku_counts[sku]
-            warehouse = warehouse_info.get(sku, None)
-            info = get_sku_info_from_df(sku, commodities_df)
-            table_data.append({
-                "SKU": sku,
-                "品名": info["product"],
-                "工厂/品牌": info["brand"],
-                "数量": f"{count} 箱",
-                "箱数数值": count
-            })
-
-            add_sku_label_page_reportlab(writer, sku, count, warehouse, info)
-            for p in pages:
-                writer.add_page(reader.pages[p])
-                writer.add_page(reader.pages[p])
-            add_sku_label_page_reportlab(writer, sku, count, warehouse, info)
-
-        out_buf = io.BytesIO()
-        writer.write(out_buf)
-        out_buf.seek(0)
-        out_bytes = out_buf.getvalue()
-        out_page_count = len(writer.pages)
+    out_buf = io.BytesIO()
+    writer.write(out_buf)
+    out_buf.seek(0)
 
     summary = {
         "original_pages": total_pages,
         "sku_count": len(sku_counts),
-        "output_pages": out_page_count
+        "output_pages": len(writer.pages)
     }
-    return out_bytes, summary, table_data
+    return out_buf.getvalue(), summary, table_data
 
 
 # ==============================================================================
-# 3. Streamlit 交互界面
+# 3. Streamlit 主页面
 # ==============================================================================
 
 def main():
-    col_title, col_opt = st.columns([3.8, 1.2], vertical_alignment="center")
-    with col_title:
-        st.subheader("亚马逊外箱面单批量处理")
+    # 顶部标题
+    st.subheader("📦 亚马逊外箱面单批量处理")
 
+    # 1. 自动检索本地商品表
     auto_commodities = find_latest_commodities_file(".")
+
+    # 2. 计算胶囊展示文案
+    custom_uploaded = st.session_state.get("custom_commodities", None)
+    if custom_uploaded is not None:
+        pill_label = f"🟢 自定义: {custom_uploaded.name} ▾"
+    elif auto_commodities:
+        pill_label = f"🟢 {auto_commodities['filename']} ▾"
+    else:
+        pill_label = "🔴 未检测到商品库 (点击上传) ▾"
+
+    # 3. 核心设计：将状态胶囊本身作为 Popover 弹窗入口
+    with st.popover(pill_label):
+        st.caption("如需临时覆盖或更换商品库，请在此上传：")
+        custom_file = st.file_uploader(
+            "上传替代商品列表",
+            type=["xlsx", "xls", "csv"],
+            label_visibility="collapsed",
+            key="custom_commodities"
+        )
+        if custom_uploaded is not None and st.button("恢复使用默认商品库", use_container_width=True):
+            del st.session_state["custom_commodities"]
+            st.rerun()
+
+    # 4. 确定当前生效的商品库
     active_df = None
-    custom_file = None
-
-    with col_opt:
-        try:
-            with st.popover(""):
-                custom_file = st.file_uploader(
-                    "更换商品列表",
-                    type=["xlsx", "xls", "csv"],
-                    label_visibility="collapsed",
-                    key="pop_uploader"
-                )
-        except AttributeError:
-            with st.expander("?? 换表格"):
-                custom_file = st.file_uploader(
-                    "更换商品列表",
-                    type=["xlsx", "xls", "csv"],
-                    label_visibility="collapsed",
-                    key="exp_uploader"
-                )
-
     if custom_file is not None:
         active_df = load_commodities_df(custom_file)
-        table_label = f"自定义: {custom_file.name}"
-        st.markdown(f'<div class="status-pill"><span class="dot dot-green"></span><span>{table_label}</span></div>', unsafe_allow_html=True)
     elif auto_commodities:
         active_df = load_commodities_df(auto_commodities["path"])
-        table_label = auto_commodities["filename"]
-        st.markdown(f'<div class="status-pill"><span class="dot dot-green"></span><span>{table_label}</span></div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="status-pill"><span class="dot dot-red"></span><span>未检测到商品库 (点击右侧换表格)</span></div>', unsafe_allow_html=True)
 
-    # 关键改动：开启 accept_multiple_files=True
+    # 5. 核心操作区：批量面单拖拽上传
     uploaded_pdfs = st.file_uploader(
         "拖拽或点击上传一个或多个亚马逊面单 PDF",
         type=["pdf"],
@@ -427,8 +385,7 @@ def main():
             total_out_pages = 0
 
             for idx, pdf_file in enumerate(uploaded_pdfs):
-                current_num = idx + 1
-                status_txt.caption(f"正在处理 [{current_num}/{num_files}]: {pdf_file.name}")
+                status_txt.caption(f"正在处理 [{idx+1}/{num_files}]: {pdf_file.name}")
                 p_bar.progress(int((idx / num_files) * 100))
 
                 try:
@@ -448,7 +405,6 @@ def main():
                     total_orig_pages += summary["original_pages"]
                     total_out_pages += summary["output_pages"]
 
-                    # 汇总表格带上来源文件名
                     for row in table_data:
                         row_copy = dict(row)
                         row_copy["来源面单"] = pdf_file.name
@@ -461,11 +417,11 @@ def main():
             status_txt.empty()
 
             if processed_results:
-                # 1. 下载区域：单文件直出 PDF，多文件打包成 ZIP
+                # 单文件直出 PDF，多文件打包为 ZIP
                 if num_files == 1:
                     single = processed_results[0]
                     st.download_button(
-                        label=f"?? 下载优化面单 ({single['summary']['output_pages']} 页)",
+                        label=f"📥 下载优化面单 ({single['summary']['output_pages']} 页)",
                         data=single["bytes"],
                         file_name=single["filename"],
                         mime="application/pdf",
@@ -473,7 +429,6 @@ def main():
                         use_container_width=True
                     )
                 else:
-                    # 打包为 ZIP
                     zip_buffer = io.BytesIO()
                     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                         for item in processed_results:
@@ -484,7 +439,7 @@ def main():
                     zip_name = f"优化面单批量包_{timestamp}.zip"
 
                     st.download_button(
-                        label=f"?? 一键下载全部优化面单 (共 {num_files} 个文件 · ZIP)",
+                        label=f"📦 一键下载全部优化面单 (共 {num_files} 个文件 · ZIP)",
                         data=zip_buffer.getvalue(),
                         file_name=zip_name,
                         mime="application/zip",
@@ -492,25 +447,24 @@ def main():
                         use_container_width=True
                     )
 
-                # 2. 统计指标卡
+                # 全局汇总指标卡
                 distinct_skus = len(set(r["SKU"] for r in all_table_data))
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("文件数", f"{num_files}")
                 c2.metric("总原箱数", f"{total_orig_pages}")
-                c3.metric("总SKU种类", f"{distinct_skus}")
+                c3.metric("总SKU数", f"{distinct_skus}")
                 c4.metric("总生成页数", f"{total_out_pages}")
 
-                # 3. 汇总数据明细表
+                # 汇总明细表格
                 if all_table_data:
                     df_display = pd.DataFrame(all_table_data)
-                    # 调整展示列顺序
                     cols = ["来源面单", "SKU", "品名", "工厂/品牌", "数量"]
                     display_cols = [c for c in cols if c in df_display.columns]
                     st.dataframe(df_display[display_cols], use_container_width=True, hide_index=True)
 
-                # 4. 多文件时提供每个文件的单独下载入口（折叠卡片）
+                # 多文件时支持展开下载单个面单
                 if num_files > 1:
-                    with st.expander("?? 点击展开单个文件独立下载"):
+                    with st.expander("📄 展开单独下载某个面单"):
                         for item in processed_results:
                             st.download_button(
                                 label=f"下载 {item['filename']} ({item['summary']['output_pages']} 页)",
