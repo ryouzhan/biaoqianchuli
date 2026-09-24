@@ -175,7 +175,7 @@ def load_active_commodities() -> Tuple[Optional[pd.DataFrame], str]:
             decrypted_bytes = cipher.decrypt(cipher_data)
             df = parse_raw_table_bytes(decrypted_bytes)
             if df is not None:
-                return df, "商品库 (已加密安全同步)"
+                return df, "商品列表 (已加密安全同步)"
         except Exception as e:
             return None, f"解密失败: {e}"
 
