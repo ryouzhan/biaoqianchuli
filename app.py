@@ -369,7 +369,7 @@ def process_single_pdf_bytes(
 def main():
     col_title, col_opt = st.columns([3.8, 1.2], vertical_alignment="center")
     with col_title:
-        st.subheader("?? 亚马逊外箱面单批量处理")
+        st.subheader("亚马逊外箱面单批量处理")
 
     auto_commodities = find_latest_commodities_file(".")
     active_df = None
@@ -377,7 +377,7 @@ def main():
 
     with col_opt:
         try:
-            with st.popover("?? 换表格"):
+            with st.popover(""):
                 custom_file = st.file_uploader(
                     "更换商品列表",
                     type=["xlsx", "xls", "csv"],
