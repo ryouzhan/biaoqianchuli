@@ -3,3 +3,4 @@ pypdf
 reportlab
 pandas
 openpyxl
+cryptography
