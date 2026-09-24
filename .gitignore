@@ -1,0 +1,6 @@
+# 严格禁止上传任何原始明文表格和本地密钥
+*.xlsx
+*.xls
+*.csv
+secret.key
+__pycache__/
