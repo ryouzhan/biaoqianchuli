@@ -1,13 +1,11 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-亚马逊外箱面单自动化处理 - 特殊项映射字典版
+亚马逊外箱面单自动化处理 - 表格化映射字典极简版
 特性：
-1. 双极简隐藏胶囊：
-   - 绿色胶囊：自动检索商品库（点击可临时更换）
-   - 闪电胶囊：特殊项 SKU 字典（点击可配置面单SKU与商品表SKU映射）
-2. 批量处理：支持拖拽多个面单，自动打包 ZIP
-3. 纯净视图：处理后仅保留下载按钮，数据与明细默认折叠隐藏
+1. 特殊项映射升级为交互式数据表格：支持像 Excel 一样直接编辑、增行、粘贴
+2. 批量处理：多文件拖拽，自动打包 ZIP
+3. 纯净视图：处理后仅保留醒目下载按钮，数据与明细默认折叠隐藏
 """
 
 import os
@@ -44,6 +42,7 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+/* 隐藏 Streamlit 默认顶部与页脚 */
 #MainMenu {visibility: hidden;}
 header {visibility: hidden;}
 footer {visibility: hidden;}
@@ -78,6 +77,12 @@ div[data-testid="stPopover"] > button:hover {
 
 div[data-testid="stPopover"] > button:focus {
     box-shadow: none !important;
+}
+
+/* 优化弹窗宽度，为表格编辑提供充裕视野 */
+div[data-testid="stPopoverBody"] {
+    min-width: 380px !important;
+    max-width: 440px !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -125,20 +130,6 @@ def save_sku_mapping(mapping: Dict[str, str]) -> None:
             json.dump(mapping, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
-
-def parse_mapping_text(text: str) -> Dict[str, str]:
-    """解析文本输入：支持冒号、等号、箭头、制表符等分隔符"""
-    mapping = {}
-    for line in text.strip().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = re.split(r'\s*(?:->|=>|[:=,\t])\s*', line, maxsplit=1)
-        if len(parts) == 2:
-            src, target = parts[0].strip(), parts.strip()
-            if src and target:
-                mapping[src] = target
-    return mapping
 
 
 # ==============================================================================
@@ -197,7 +188,6 @@ def load_commodities_df(source: Any) -> Optional[pd.DataFrame]:
 
 
 def get_sku_info_from_df(sku: str, df: Optional[pd.DataFrame], sku_mapping: Optional[Dict[str, str]] = None) -> dict:
-    # 核心：如果命中特殊项字典，先转换为商品库对应的真实 SKU
     lookup_sku = sku
     if sku_mapping and sku in sku_mapping:
         lookup_sku = sku_mapping[sku]
@@ -212,10 +202,8 @@ def get_sku_info_from_df(sku: str, df: Optional[pd.DataFrame], sku_mapping: Opti
     if not col_sku or not col_product or not col_brand:
         return {"product": "表格列缺失", "brand": "缺少SKU/品名/品牌"}
 
-    # 先用映射后的 lookup_sku 检索
     match = df[df[col_sku].astype(str).str.strip() == lookup_sku.strip()]
     if match.empty:
-        # 如果未匹配且有映射过，再用原始面单 SKU 兜底检索一次
         if lookup_sku != sku:
             match = df[df[col_sku].astype(str).str.strip() == sku.strip()]
         if match.empty:
@@ -370,7 +358,7 @@ def process_single_pdf_bytes(
 def main():
     st.subheader("📦 亚马逊外箱面单批量处理")
 
-    # 1. 加载特殊映射字典（优先 session_state，其次磁盘文件）
+    # 1. 加载特殊映射字典
     if "sku_mapping" not in st.session_state:
         st.session_state["sku_mapping"] = load_sku_mapping()
     current_mapping = st.session_state["sku_mapping"]
@@ -390,7 +378,7 @@ def main():
     mapping_pill_label = f"⚡ 特殊映射 ({map_count}条) ▾" if map_count > 0 else "⚡ 特殊映射 ▾"
 
     # 3. 顶部并排双胶囊弹窗
-    col_p1, col_p2, _ = st.columns([1.6, 1.1, 1.3])
+    col_p1, col_p2, _ = st.columns([1.5, 1.2, 1.3])
 
     with col_p1:
         with st.popover(table_pill_label):
@@ -407,22 +395,49 @@ def main():
 
     with col_p2:
         with st.popover(mapping_pill_label):
-            st.caption("配置【面单SKU】与【商品库SKU】对应关系（每行一条）：")
-            existing_text = "\n".join(f"{k} : {v}" for k, v in current_mapping.items())
-            user_input = st.text_area(
-                "映射规则",
-                value=existing_text,
-                placeholder="例如：\nMACG001RD6 : MACG001RD-6\n面单SKU : 商品库真实SKU",
-                height=130,
-                label_visibility="collapsed"
+            st.caption("双击单元格输入，支持从 Excel 复制两列直接粘贴：")
+
+            # 准备表格数据源（至少保留一行空白行方便直接点击输入）
+            rows = [{"面单SKU": k, "商品库SKU": v} for k, v in current_mapping.items()]
+            if not rows:
+                rows = [{"面单SKU": "", "商品库SKU": ""}]
+            df_mapping = pd.DataFrame(rows)
+
+            # 核心：Excel 风格的可编辑表格组件
+            edited_df = st.data_editor(
+                df_mapping,
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                height=220,
+                column_config={
+                    "面单SKU": st.column_config.TextColumn(
+                        "面单 SKU",
+                        help="面单上打印的原始SKU",
+                        required=True
+                    ),
+                    "商品库SKU": st.column_config.TextColumn(
+                        "商品库 SKU",
+                        help="商品库表格中对应的真实SKU",
+                        required=True
+                    )
+                },
+                key="sku_mapping_table_editor"
             )
+
             c_btn1, c_btn2 = st.columns(2)
             if c_btn1.button("保存规则", type="primary", use_container_width=True):
-                new_map = parse_mapping_text(user_input)
+                new_map = {}
+                for _, r in edited_df.iterrows():
+                    src = str(r.get("面单SKU", "")).strip()
+                    tgt = str(r.get("商品库SKU", "")).strip()
+                    if src and tgt and src != "nan" and tgt != "nan":
+                        new_map[src] = tgt
                 st.session_state["sku_mapping"] = new_map
                 save_sku_mapping(new_map)
                 st.rerun()
-            if c_btn2.button("清空规则", use_container_width=True):
+
+            if c_btn2.button("清空全部", use_container_width=True):
                 st.session_state["sku_mapping"] = {}
                 save_sku_mapping({})
                 st.rerun()
@@ -490,7 +505,7 @@ def main():
             status_txt.empty()
 
             if processed_results:
-                # 只保留核心下载按钮
+                # 醒目的单/多文件下载按钮
                 if num_files == 1:
                     single = processed_results[0]
                     st.download_button(
