@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-亚马逊外箱面单处理工具 - Streamlit Web 版
-部署目标：streamlit.io
+亚马逊外箱面单自动化处理 - 极简高颜值 Web 版
+部署环境：streamlit.io (Streamlit Cloud)
 """
 
 import os
@@ -27,23 +27,71 @@ from reportlab.pdfbase.ttfonts import TTFont
 import pandas as pd
 
 # ==============================================================================
-# 0. 页面基本配置与字体初始化
+# 0. 极简页面与字体初始化
 # ==============================================================================
 st.set_page_config(
-    page_title="亚马逊外箱面单优化工具",
+    page_title="外箱面单处理",
     page_icon="📦",
     layout="centered"
 )
 
+# 注入极简美化样式
+st.markdown("""
+<style>
+/* 隐藏 Streamlit 默认顶部及底部杂物 */
+#MainMenu {visibility: hidden;}
+header {visibility: hidden;}
+footer {visibility: hidden;}
+
+/* 容器排版内边距与居中宽度限制 */
+.block-container {
+    padding-top: 2.2rem;
+    padding-bottom: 2rem;
+    max-width: 680px;
+}
+
+/* 极简状态胶囊样式 */
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 14px;
+    border-radius: 20px;
+    font-size: 0.82rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #94a3b8;
+    margin-top: 2px;
+    margin-bottom: 12px;
+}
+.dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+}
+.dot-green { background-color: #10b981; box-shadow: 0 0 6px #10b981; }
+.dot-red { background-color: #ef4444; box-shadow: 0 0 6px #ef4444; }
+
+/* 换表格小按钮样式微调 */
+div[data-testid="stPopover"] > button {
+    border-radius: 16px;
+    padding: 2px 10px;
+    font-size: 0.8rem;
+    height: 30px;
+}
+</style>
+""", unsafe_allow_html=True)
+
 DEFAULT_FONT = "Helvetica"
 FONT_SEARCH_PATHS = [
-    # 优先 Linux (Streamlit Cloud Debian) 系统字体
+    # Linux (Streamlit Cloud Debian)
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    # 本地仓库自带字体
+    # 本地仓库自带
     "simhei.ttf",
     "wqy-microhei.ttc",
-    # Windows 常见路径 (本地测试用)
+    # Windows
     r"C:\Windows\Fonts\simhei.ttf",
     r"C:\Windows\Fonts\msyh.ttc",
     r"C:\Windows\Fonts\simsun.ttc",
@@ -70,14 +118,10 @@ if not CHINESE_FONT_REGISTERED:
 
 
 # ==============================================================================
-# 1. 核心业务逻辑：自动检索最新 Commodities 表格
+# 1. 自动定位最新 Commodities 表格
 # ==============================================================================
 
 def find_latest_commodities_file(directory: str = ".") -> Optional[Dict[str, Any]]:
-    """
-    在指定目录中搜索文件名包含 'Commodities' 的表格文件，
-    若存在多份，优先按文件名提取的时间日期排序，其次按文件修改时间排序。
-    """
     valid_exts = (".xlsx", ".xls", ".csv")
     candidates = []
 
@@ -85,25 +129,22 @@ def find_latest_commodities_file(directory: str = ".") -> Optional[Dict[str, Any
         return None
 
     for fname in os.listdir(directory):
-        if fname.startswith("~$"):  # 忽略临时打开的 Excel 文件
+        if fname.startswith("~$"):
             continue
         if any(fname.lower().endswith(ext) for ext in valid_exts):
-            if "commodit" in fname.lower():  # 容错匹配 Commodities / Commoditie
+            if "commodit" in fname.lower():
                 full_path = os.path.join(directory, fname)
                 mtime = os.path.getmtime(full_path)
 
-                # 正则提取文件名中包含的日期格式 (如 2026-09-23, 20260923, 2026_09_23)
                 date_matches = re.findall(
                     r'\b20\d{2}[-_]?(?:0[1-9]|1[0-2])[-_]?(?:0[1-9]|[12]\d|3[01])\b|\b20\d{6}\b',
                     fname
                 )
                 date_score = 0
-                date_str = ""
                 if date_matches:
                     clean_date = re.sub(r'[-_]', '', date_matches[-1])
                     try:
                         date_score = int(clean_date)
-                        date_str = f"{clean_date[:4]}-{clean_date[4:6]}-{clean_date[6:8]}"
                     except ValueError:
                         date_score = 0
 
@@ -111,59 +152,43 @@ def find_latest_commodities_file(directory: str = ".") -> Optional[Dict[str, Any
                     "path": full_path,
                     "filename": fname,
                     "date_score": date_score,
-                    "date_str": date_str,
                     "mtime": mtime,
-                    "mtime_str": datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
                 })
 
     if not candidates:
         return None
 
-    # 排序：优先按提取出来的日期数字降序，其次按系统修改时间降序
     candidates.sort(key=lambda x: (x["date_score"], x["mtime"]), reverse=True)
-    best = candidates[0]
-    reason = f"识别到文件名最新日期: {best['date_str']}" if best["date_score"] > 0 else f"文件最新修改时间: {best['mtime_str']}"
-    best["reason"] = reason
-    best["all_candidates"] = candidates
-    return best
+    return candidates[0]
 
 
-def load_commodities_df(excel_source: Any) -> Optional[pd.DataFrame]:
-    """读取 Commodities 数据表 (支持路径或 Streamlit 上传的内存文件)"""
+def load_commodities_df(source: Any) -> Optional[pd.DataFrame]:
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            if isinstance(excel_source, str):
-                if excel_source.lower().endswith(".csv"):
-                    df = pd.read_csv(excel_source)
-                else:
-                    df = pd.read_excel(excel_source)
+            if isinstance(source, str):
+                return pd.read_csv(source) if source.lower().endswith(".csv") else pd.read_excel(source)
             else:
-                # 内存文件对象
-                if getattr(excel_source, "name", "").lower().endswith(".csv"):
-                    df = pd.read_csv(excel_source)
-                else:
-                    df = pd.read_excel(excel_source)
-            return df
+                is_csv = getattr(source, "name", "").lower().endswith(".csv")
+                return pd.read_csv(source) if is_csv else pd.read_excel(source)
     except Exception:
         return None
 
 
 def get_sku_info_from_df(sku: str, df: Optional[pd.DataFrame]) -> dict:
-    """从给定的 DataFrame 匹配品名与工厂/品牌"""
     if df is None:
-        return {"product": "未找到商品列表", "brand": "请检查表格文件"}
+        return {"product": "未找到商品库", "brand": "请检查表格"}
 
     col_sku = next((c for c in df.columns if str(c).strip().upper() == "SKU"), None)
     col_product = next((c for c in df.columns if "品名" in str(c) or "商品" in str(c)), None)
     col_brand = next((c for c in df.columns if "品牌" in str(c) or "工厂" in str(c)), None)
 
     if not col_sku or not col_product or not col_brand:
-        return {"product": "表格格式错误", "brand": "缺少SKU/品名/品牌列"}
+        return {"product": "表格列缺失", "brand": "缺少SKU/品名/品牌"}
 
     match = df[df[col_sku].astype(str).str.strip() == sku.strip()]
     if match.empty:
-        return {"product": "未匹配到SKU", "brand": "请到塞狐下载最新商品列表"}
+        return {"product": "未匹配到SKU", "brand": "请更新商品库"}
 
     product = str(match[col_product].values[0]) if pd.notna(match[col_product].values[0]) else ""
     brand = str(match[col_brand].values[0]) if pd.notna(match[col_brand].values[0]) else ""
@@ -171,7 +196,6 @@ def get_sku_info_from_df(sku: str, df: Optional[pd.DataFrame]) -> dict:
 
 
 def extract_sku_from_text(text: str) -> str:
-    """从面单页面文本中智能提取 SKU 编码"""
     lines = text.split("\n")
     for line in lines:
         match = re.search(r"SKU\s*[:：]\s*(\S+)", line, re.IGNORECASE)
@@ -187,7 +211,6 @@ def extract_sku_from_text(text: str) -> str:
 
 
 def extract_warehouse_from_text(text: str) -> str:
-    """从面单文本中提取 FBA 目标仓库代码"""
     lines = text.split("\n")
     for line in lines:
         match = re.search(r"FBA STA \(.*\)-([A-Z0-9]{3,5})\b", line)
@@ -207,7 +230,6 @@ def add_sku_label_page(
     sku_info: Optional[dict] = None,
     readers_cache: Optional[list] = None
 ) -> None:
-    """生成 10*10cm (283.46x283.46 pt) 隔页标注卡"""
     packet = io.BytesIO()
     c = canvas.Canvas(packet, pagesize=(283.46, 283.46))
 
@@ -255,17 +277,16 @@ def process_pdf_in_memory(
     commodities_df: Optional[pd.DataFrame],
     progress_callback=None
 ) -> Tuple[bytes, Dict[str, Any], List[Dict[str, Any]]]:
-    """在内存中完整处理 PDF 并返回生成文件的二进制字节流"""
     sku_counts = defaultdict(int)
     sku_pages = defaultdict(list)
     warehouse_info = defaultdict(str)
 
-    # 1. 解析阶段
+    # 1. 页面分析
     with pdfplumber.open(io.BytesIO(pdf_file_bytes)) as pdf:
         total_pages = len(pdf.pages)
         for i, page in enumerate(pdf.pages):
             if progress_callback:
-                progress_callback(i + 1, total_pages, "正在扫描解析页面...")
+                progress_callback(i + 1, total_pages, "解析面单中...")
             text = page.extract_text() or ""
             if not text:
                 continue
@@ -278,20 +299,19 @@ def process_pdf_in_memory(
             sku_counts[sku] += 1
             sku_pages[sku].append(i)
 
-    # 2. 重构生成阶段
+    # 2. 面单重组
     writer = PdfWriter()
     original_reader = PdfReader(io.BytesIO(pdf_file_bytes))
     readers_cache = [original_reader]
 
     total_skus = len(sku_pages)
     current_sku_idx = 0
-
     table_data = []
 
     for sku, pages in sku_pages.items():
         current_sku_idx += 1
         if progress_callback:
-            progress_callback(current_sku_idx, total_skus, f"正在生成 SKU 隔页卡与双份面单 ({current_sku_idx}/{total_skus})...")
+            progress_callback(current_sku_idx, total_skus, f"重构排版中 ({current_sku_idx}/{total_skus})...")
 
         count = sku_counts[sku]
         warehouse = warehouse_info.get(sku, None)
@@ -301,16 +321,13 @@ def process_pdf_in_memory(
             "SKU": sku,
             "品名": info["product"],
             "工厂/品牌": info["brand"],
-            "箱数": f"{count} 箱"
+            "数量": f"{count} 箱"
         })
 
-        # 前置标牌卡
         add_sku_label_page(writer, sku, count, warehouse, info, readers_cache=readers_cache)
-        # 双份原面单
         for page_num in pages:
             writer.add_page(original_reader.pages[page_num])
             writer.add_page(original_reader.pages[page_num])
-        # 后置标牌卡
         add_sku_label_page(writer, sku, count, warehouse, info, readers_cache=readers_cache)
 
     out_buf = io.BytesIO()
@@ -327,102 +344,102 @@ def process_pdf_in_memory(
 
 
 # ==============================================================================
-# 2. Streamlit 页面渲染与交互
+# 2. 极简页面渲染
 # ==============================================================================
 
 def main():
-    st.title("📦 亚马逊外箱面单自动化处理")
-    st.markdown("自动解析 SKU 并插入 **10×10 cm 隔页标注卡**，原面单**自动打印双份**。")
+    # 顶部标题与右上角轻量按钮
+    col_title, col_opt = st.columns([3.8, 1.2], vertical_alignment="center")
+    
+    with col_title:
+        st.subheader("📦 亚马逊外箱面单处理")
 
-    # 检查仓库中自动匹配的 Commodities 表格
-    commodities_info = find_latest_commodities_file(".")
+    # 自动检索最新的 Commodities 表格
+    auto_commodities = find_latest_commodities_file(".")
     active_df = None
 
-    with st.container():
-        st.subheader("1. 商品列表 (Commodities 表格)")
-        if commodities_info:
-            st.success(f"自动检测到最新商品表格：**`{commodities_info['filename']}`**")
-            st.caption(f"判定规则：{commodities_info['reason']}")
-            active_df = load_commodities_df(commodities_info["path"])
+    # 极简气泡弹窗（Popover），平时完全隐藏，点击才展开上传
+    custom_file = None
+    with col_opt:
+        try:
+            with st.popover("⚙️ 换表格"):
+                custom_file = st.file_uploader(
+                    "更换商品列表",
+                    type=["xlsx", "xls", "csv"],
+                    label_visibility="collapsed",
+                    key="pop_uploader"
+                )
+        except AttributeError:
+            with st.expander("⚙️ 换表格"):
+                custom_file = st.file_uploader(
+                    "更换商品列表",
+                    type=["xlsx", "xls", "csv"],
+                    label_visibility="collapsed",
+                    key="exp_uploader"
+                )
 
-            if len(commodities_info["all_candidates"]) > 1:
-                with st.expander(f"查看同目录下检测到的所有候选表格 ({len(commodities_info['all_candidates'])} 份)"):
-                    for c in commodities_info["all_candidates"]:
-                        is_selected = " (当前选中)" if c["path"] == commodities_info["path"] else ""
-                        st.text(f"• {c['filename']} - 修改时间: {c['mtime_str']}{is_selected}")
-        else:
-            st.warning("⚠️ 仓库同目录下未找到包含 `Commodities` 的表格文件，请手动上传。")
+    # 状态指示胶囊
+    if custom_file is not None:
+        active_df = load_commodities_df(custom_file)
+        table_label = f"自定义: {custom_file.name}"
+        st.markdown(f'<div class="status-pill"><span class="dot dot-green"></span><span>{table_label}</span></div>', unsafe_allow_html=True)
+    elif auto_commodities:
+        active_df = load_commodities_df(auto_commodities["path"])
+        table_label = auto_commodities["filename"]
+        st.markdown(f'<div class="status-pill"><span class="dot dot-green"></span><span>{table_label}</span></div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="status-pill"><span class="dot dot-red"></span><span>未检测到商品库 (点击右侧换表格)</span></div>', unsafe_allow_html=True)
 
-        # 备选：手动上传商品列表覆盖
-        uploaded_excel = st.file_uploader(
-            "或者手动上传商品列表 (将优先使用上传的表格)",
-            type=["xlsx", "xls", "csv"],
-            key="excel_uploader"
-        )
-        if uploaded_excel is not None:
-            active_df = load_commodities_df(uploaded_excel)
-            st.info(f"已切换为手动上传的表格：`{uploaded_excel.name}`")
-
-    st.divider()
-
-    # 上传 PDF 面单
-    st.subheader("2. 上传外箱面单 PDF")
-    uploaded_pdf = st.file_uploader("选择亚马逊原版外箱面单 PDF 文件", type=["pdf"], key="pdf_uploader")
+    # 主操作区：面单拖拽上传
+    uploaded_pdf = st.file_uploader(
+        "拖拽或点击上传亚马逊面单 PDF",
+        type=["pdf"],
+        label_visibility="collapsed",
+        key="main_pdf"
+    )
 
     if uploaded_pdf is not None:
-        file_size_mb = len(uploaded_pdf.getvalue()) / (1024 * 1024)
-        st.write(f"📄 文件名: **{uploaded_pdf.name}** ({file_size_mb:.2f} MB)")
+        if st.button("开始处理", type="primary", use_container_width=True):
+            p_bar = st.progress(0)
+            status_txt = st.empty()
 
-        if st.button("🚀 开始一键优化处理", type="primary", use_container_width=True):
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            def update_progress(current, total, message):
-                percent = int(current / total * 100) if total > 0 else 0
-                progress_bar.progress(min(percent, 100))
-                status_text.text(f"[{percent}%] {message}")
+            def on_progress(cur, tot, msg):
+                pct = int(cur / tot * 100) if tot > 0 else 0
+                p_bar.progress(min(pct, 100))
+                status_txt.caption(f"{pct}% · {msg}")
 
             try:
-                processed_bytes, summary, table_data = process_pdf_in_memory(
+                res_bytes, summary, table_data = process_pdf_in_memory(
                     uploaded_pdf.getvalue(),
                     active_df,
-                    progress_callback=update_progress
+                    progress_callback=on_progress
                 )
-                progress_bar.progress(100)
-                status_text.text(" 处理完成！")
+                p_bar.progress(100)
+                status_txt.empty()
 
-                st.balloons()
-                st.success("🎉 面单优化重组完成！")
-
-                # 指标展示卡
-                col1, col2, col3 = st.columns(3)
-                col1.metric("原始面单数", f"{summary['total_original_pages']} 箱/页")
-                col2.metric("识别 SKU 种类", f"{summary['sku_types_count']} 种")
-                col3.metric("生成新 PDF 总页数", f"{summary['total_output_pages']} 页")
-
-                # 下载按钮
-                base_name = os.path.splitext(uploaded_pdf.name)[0]
-                download_filename = f"{base_name}-优化.pdf"
-
+                # 下载区域
+                out_name = f"{os.path.splitext(uploaded_pdf.name)[0]}-优化.pdf"
                 st.download_button(
-                    label=f" 立即下载优化后的面单 ({download_filename})",
-                    data=processed_bytes,
-                    file_name=download_filename,
+                    label=f"📥 下载优化面单 ({summary['total_output_pages']} 页)",
+                    data=res_bytes,
+                    file_name=out_name,
                     mime="application/pdf",
                     type="primary",
                     use_container_width=True
                 )
 
-                # SKU 统计明细表
-                st.subheader("📊 SKU 箱数明细汇总")
+                # 简洁指标卡
+                c1, c2, c3 = st.columns(3)
+                c1.metric("原箱数", f"{summary['total_original_pages']}")
+                c2.metric("SKU 数", f"{summary['sku_types_count']}")
+                c3.metric("总页数", f"{summary['total_output_pages']}")
+
+                # 简洁明细表
                 if table_data:
-                    df_display = pd.DataFrame(table_data)
-                    st.dataframe(df_display, use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
 
             except Exception as e:
-                st.error(f"❌ 处理过程中出现异常：{e}")
-                import traceback
-                st.code(traceback.format_exc())
+                st.error(f"处理失败: {e}")
 
 
 if __name__ == "__main__":
