@@ -1,11 +1,11 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-亚马逊外箱面单自动化处理 - 胶囊一体化极简版
-功能：
-1. 自动检测最新商品库，点击胶囊可直接呼出隐藏换表弹窗
-2. 支持单文件 / 多文件批量拖拽处理
-3. 单文件直接下载优化后的 PDF，多文件自动打包为 ZIP 供一键下载
+亚马逊外箱面单自动化处理 - 极简极致纯净版 (偏好 B)
+特点：
+1. 胶囊与弹窗合二为一：点击绿色表名胶囊可展开临时换表
+2. 批量处理：支持同时拖入多个面单，自动打包 ZIP
+3. 极致纯净：处理完成后只显示醒目的下载按钮，所有指标卡和明细大表默认折叠隐藏
 """
 
 import os
@@ -20,7 +20,7 @@ from collections import defaultdict
 import streamlit as st
 import pandas as pd
 
-# 双兼容导入 PDF 读写库
+# 双兼容导入 PDF 读写库 (优先 pypdf，降级 PyPDF2)
 try:
     from pypdf import PdfReader, PdfWriter
 except ImportError:
@@ -39,22 +39,22 @@ st.set_page_config(
     layout="centered"
 )
 
-# 注入 CSS：将 st.popover 按钮定制为极简圆角状态胶囊
+# 定制 CSS：隐藏多余组件并将弹窗按钮做成极简圆角状态胶囊
 st.markdown("""
 <style>
-/* 隐藏 Streamlit 默认顶部与页脚 */
+/* 隐藏 Streamlit 默认顶部菜单与页脚 */
 #MainMenu {visibility: hidden;}
 header {visibility: hidden;}
 footer {visibility: hidden;}
 
-/* 内容居中与宽度约束 */
+/* 内容居中宽度 */
 .block-container {
     padding-top: 2.2rem;
     padding-bottom: 2rem;
     max-width: 720px;
 }
 
-/* 核心：将 Popover 按钮伪装成极简圆角状态胶囊 */
+/* 将 Popover 按钮样式伪装成圆角胶囊 */
 div[data-testid="stPopover"] > button {
     border-radius: 20px !important;
     padding: 4px 14px !important;
@@ -70,14 +70,12 @@ div[data-testid="stPopover"] > button {
     transition: all 0.2s ease;
 }
 
-/* 鼠标悬停时微亮 */
 div[data-testid="stPopover"] > button:hover {
     border-color: rgba(255, 255, 255, 0.28) !important;
     background: rgba(255, 255, 255, 0.09) !important;
     color: #e2e8f0 !important;
 }
 
-/* 去除默认 popover 按钮内的多余轮廓 */
 div[data-testid="stPopover"] > button:focus {
     box-shadow: none !important;
 }
@@ -87,7 +85,7 @@ div[data-testid="stPopover"] > button:focus {
 # 中文字体探测与注册
 DEFAULT_FONT = "Helvetica"
 FONT_SEARCH_PATHS = [
-    # Linux (Streamlit Cloud Debian: packages.txt 中安装 fonts-wqy-microhei)
+    # Linux (Streamlit Cloud: packages.txt 中安装 fonts-wqy-microhei)
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     # 本地目录
@@ -213,7 +211,7 @@ def extract_warehouse_from_text(text: str) -> str:
 
 
 # ==============================================================================
-# 2. 面单分隔页绘制与排版逻辑
+# 2. 分隔页生成与 PDF 组装
 # ==============================================================================
 
 def add_sku_label_page(
@@ -226,7 +224,7 @@ def add_sku_label_page(
     packet = io.BytesIO()
     c = canvas.Canvas(packet, pagesize=(283.46, 283.46))
 
-    # 边框装饰线
+    # 边框装饰
     c.setStrokeColorRGB(0.75, 0.75, 0.75)
     c.rect(12, 12, 283.46 - 24, 283.46 - 24)
 
@@ -304,10 +302,13 @@ def process_single_pdf_bytes(
             "数量": f"{count} 箱"
         })
 
+        # 头部分隔页
         add_sku_label_page(writer, sku, count, warehouse, info)
+        # 每箱面单复制两份
         for p in pages:
             writer.add_page(reader.pages[p])
             writer.add_page(reader.pages[p])
+        # 尾部分隔页
         add_sku_label_page(writer, sku, count, warehouse, info)
 
     out_buf = io.BytesIO()
@@ -333,7 +334,7 @@ def main():
     # 1. 自动检索本地商品表
     auto_commodities = find_latest_commodities_file(".")
 
-    # 2. 计算胶囊展示文案
+    # 2. 状态胶囊文案计算
     custom_uploaded = st.session_state.get("custom_commodities", None)
     if custom_uploaded is not None:
         pill_label = f"🟢 自定义: {custom_uploaded.name} ▾"
@@ -342,7 +343,7 @@ def main():
     else:
         pill_label = "🔴 未检测到商品库 (点击上传) ▾"
 
-    # 3. 核心设计：将状态胶囊本身作为 Popover 弹窗入口
+    # 3. 胶囊即按钮：点击展开隐藏换表弹窗
     with st.popover(pill_label):
         st.caption("如需临时覆盖或更换商品库，请在此上传：")
         custom_file = st.file_uploader(
@@ -355,14 +356,14 @@ def main():
             del st.session_state["custom_commodities"]
             st.rerun()
 
-    # 4. 确定当前生效的商品库
+    # 4. 判定生效的商品库
     active_df = None
     if custom_file is not None:
         active_df = load_commodities_df(custom_file)
     elif auto_commodities:
         active_df = load_commodities_df(auto_commodities["path"])
 
-    # 5. 核心操作区：批量面单拖拽上传
+    # 5. 核心操作区：批量面单拖拽
     uploaded_pdfs = st.file_uploader(
         "拖拽或点击上传一个或多个亚马逊面单 PDF",
         type=["pdf"],
@@ -417,7 +418,7 @@ def main():
             status_txt.empty()
 
             if processed_results:
-                # 单文件直出 PDF，多文件打包为 ZIP
+                # ----------------- 【核心：只突出显示下载按钮】 -----------------
                 if num_files == 1:
                     single = processed_results[0]
                     st.download_button(
@@ -429,6 +430,7 @@ def main():
                         use_container_width=True
                     )
                 else:
+                    # 多文件打 ZIP 包
                     zip_buffer = io.BytesIO()
                     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                         for item in processed_results:
@@ -447,22 +449,22 @@ def main():
                         use_container_width=True
                     )
 
-                # 全局汇总指标卡
-                distinct_skus = len(set(r["SKU"] for r in all_table_data))
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("文件数", f"{num_files}")
-                c2.metric("总原箱数", f"{total_orig_pages}")
-                c3.metric("总SKU数", f"{distinct_skus}")
-                c4.metric("总生成页数", f"{total_out_pages}")
+                # ----------------- 【偏好 B：统计数字与大表全部默认隐藏】 -----------------
+                with st.expander("📊 查看处理数据与明细 (点击展开)"):
+                    distinct_skus = len(set(r["SKU"] for r in all_table_data))
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("文件数", f"{num_files}")
+                    c2.metric("总原箱数", f"{total_orig_pages}")
+                    c3.metric("总SKU数", f"{distinct_skus}")
+                    c4.metric("总生成页数", f"{total_out_pages}")
 
-                # 汇总明细表格
-                if all_table_data:
-                    df_display = pd.DataFrame(all_table_data)
-                    cols = ["来源面单", "SKU", "品名", "工厂/品牌", "数量"]
-                    display_cols = [c for c in cols if c in df_display.columns]
-                    st.dataframe(df_display[display_cols], use_container_width=True, hide_index=True)
+                    if all_table_data:
+                        df_display = pd.DataFrame(all_table_data)
+                        cols = ["来源面单", "SKU", "品名", "工厂/品牌", "数量"]
+                        display_cols = [c for c in cols if c in df_display.columns]
+                        st.dataframe(df_display[display_cols], use_container_width=True, hide_index=True)
 
-                # 多文件时支持展开下载单个面单
+                # 多文件时可展开独立下载某个面单
                 if num_files > 1:
                     with st.expander("📄 展开单独下载某个面单"):
                         for item in processed_results:
