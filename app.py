@@ -1,11 +1,7 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-亚马逊外箱面单自动化处理 - 表格化映射字典极简版
-特性：
-1. 特殊项映射升级为交互式数据表格：支持像 Excel 一样直接编辑、增行、粘贴
-2. 批量处理：多文件拖拽，自动打包 ZIP
-3. 纯净视图：处理后仅保留醒目下载按钮，数据与明细默认折叠隐藏
+亚马逊外箱面单自动化处理 - 密文云端同步 + 极简纯净版
 """
 
 import os
@@ -20,8 +16,9 @@ from collections import defaultdict
 
 import streamlit as st
 import pandas as pd
+from cryptography.fernet import Fernet
 
-# 双兼容导入 PDF 读写库 (优先 pypdf，降级 PyPDF2)
+# 双兼容导入 PDF 读写库
 try:
     from pypdf import PdfReader, PdfWriter
 except ImportError:
@@ -32,7 +29,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # ==============================================================================
-# 0. 极简页面样式与字体
+# 0. 极简样式与字体加载
 # ==============================================================================
 st.set_page_config(
     page_title="外箱面单批量处理",
@@ -42,7 +39,6 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-/* 隐藏 Streamlit 默认顶部与页脚 */
 #MainMenu {visibility: hidden;}
 header {visibility: hidden;}
 footer {visibility: hidden;}
@@ -53,7 +49,6 @@ footer {visibility: hidden;}
     max-width: 720px;
 }
 
-/* 将所有 Popover 按钮统一修饰为极简圆角状态胶囊 */
 div[data-testid="stPopover"] > button {
     border-radius: 20px !important;
     padding: 4px 14px !important;
@@ -79,7 +74,6 @@ div[data-testid="stPopover"] > button:focus {
     box-shadow: none !important;
 }
 
-/* 优化弹窗宽度，为表格编辑提供充裕视野 */
 div[data-testid="stPopoverBody"] {
     min-width: 380px !important;
     max-width: 440px !important;
@@ -109,12 +103,11 @@ for fpath in FONT_SEARCH_PATHS:
 
 
 # ==============================================================================
-# 1. 特殊项映射字典管理 (本地持久化保存)
+# 1. 特殊项映射字典管理
 # ==============================================================================
 MAPPING_FILE = "sku_mapping.json"
 
 def load_sku_mapping() -> Dict[str, str]:
-    """从本地 json 文件加载映射字典"""
     if os.path.exists(MAPPING_FILE):
         try:
             with open(MAPPING_FILE, "r", encoding="utf-8") as f:
@@ -124,7 +117,6 @@ def load_sku_mapping() -> Dict[str, str]:
     return {}
 
 def save_sku_mapping(mapping: Dict[str, str]) -> None:
-    """持久化保存到本地 json"""
     try:
         with open(MAPPING_FILE, "w", encoding="utf-8") as f:
             json.dump(mapping, f, ensure_ascii=False, indent=2)
@@ -133,58 +125,81 @@ def save_sku_mapping(mapping: Dict[str, str]) -> None:
 
 
 # ==============================================================================
-# 2. 商品库查找与提取逻辑
+# 2. 自动解密与商品表加载逻辑
 # ==============================================================================
 
-def find_latest_commodities_file(directory: str = ".") -> Optional[Dict[str, Any]]:
-    valid_exts = (".xlsx", ".xls", ".csv")
-    candidates = []
-    if not os.path.exists(directory):
-        return None
-
-    for fname in os.listdir(directory):
-        if fname.startswith("~$"):
-            continue
-        if any(fname.lower().endswith(ext) for ext in valid_exts):
-            if "commodit" in fname.lower():
-                full_path = os.path.join(directory, fname)
-                mtime = os.path.getmtime(full_path)
-                date_matches = re.findall(r'\b20\d{6,8}\b|\b20\d{2}[-_]\d{2}[-_]\d{2}\b', fname)
-                date_score = int(re.sub(r'[-_]', '', date_matches[-1])) if date_matches else 0
-                candidates.append({
-                    "path": full_path,
-                    "filename": fname,
-                    "date_score": date_score,
-                    "mtime": mtime,
-                })
-
-    if not candidates:
-        return None
-    candidates.sort(key=lambda x: (x["date_score"], x["mtime"]), reverse=True)
-    return candidates[0]
+def get_secret_key() -> Optional[bytes]:
+    """获取解密密钥：优先 Streamlit Secrets，其次本地 secret.key"""
+    if hasattr(st, "secrets") and "COMMODITIES_KEY" in st.secrets:
+        return st.secrets["COMMODITIES_KEY"].encode()
+    if os.path.exists("secret.key"):
+        try:
+            with open("secret.key", "rb") as f:
+                return f.read().strip()
+        except Exception:
+            pass
+    return None
 
 
-def load_commodities_df(source: Any) -> Optional[pd.DataFrame]:
+def parse_raw_table_bytes(raw_bytes: bytes) -> Optional[pd.DataFrame]:
+    """从二进制字节流自动识别 Excel 或 CSV 并转为 DataFrame"""
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            if isinstance(source, str):
-                if source.lower().endswith(".csv"):
-                    try:
-                        return pd.read_csv(source, encoding="utf-8-sig")
-                    except Exception:
-                        return pd.read_csv(source, encoding="gbk")
-                return pd.read_excel(source)
-            else:
-                is_csv = getattr(source, "name", "").lower().endswith(".csv")
-                if is_csv:
-                    try:
-                        return pd.read_csv(source, encoding="utf-8-sig")
-                    except Exception:
-                        return pd.read_csv(source, encoding="gbk")
-                return pd.read_excel(source)
+        # Excel .xlsx 标准 zip 头魔数
+        if raw_bytes.startswith(b"PK\x03\x04") or raw_bytes.startswith(b"\xd0\xcf\x11\xe0"):
+            return pd.read_excel(io.BytesIO(raw_bytes))
+        else:
+            try:
+                return pd.read_csv(io.BytesIO(raw_bytes), encoding="utf-8-sig")
+            except Exception:
+                return pd.read_csv(io.BytesIO(raw_bytes), encoding="gbk")
     except Exception:
         return None
+
+
+def load_active_commodities() -> Tuple[Optional[pd.DataFrame], str]:
+    """
+    智能定位并加载商品表：
+    1. 优先解密云端 commodities.dat
+    2. 若无则检索本地明文表格（方便离线单机测试）
+    """
+    key = get_secret_key()
+
+    # 优先检测加密文件 commodities.dat
+    if os.path.exists("commodities.dat"):
+        if not key:
+            return None, "未配置解密密钥 (请在 Secrets 填入 COMMODITIES_KEY)"
+        try:
+            with open("commodities.dat", "rb") as f:
+                cipher_data = f.read()
+            cipher = Fernet(key)
+            decrypted_bytes = cipher.decrypt(cipher_data)
+            df = parse_raw_table_bytes(decrypted_bytes)
+            if df is not None:
+                return df, "商品库 (已加密安全同步)"
+        except Exception as e:
+            return None, f"解密失败: {e}"
+
+    # 备选：本地明文表格
+    valid_exts = (".xlsx", ".xls", ".csv")
+    candidates = []
+    for fname in os.listdir("."):
+        if fname.startswith("~$"):
+            continue
+        if any(fname.lower().endswith(ext) for ext in valid_exts) and "commodit" in fname.lower():
+            full_path = os.path.join(".", fname)
+            candidates.append((full_path, fname, os.path.getmtime(full_path)))
+
+    if candidates:
+        candidates.sort(key=lambda x: x, reverse=True)
+        latest_path, latest_name, _ = candidates[0]
+        try:
+            with open(latest_path, "rb") as f:
+                df = parse_raw_table_bytes(f.read())
+            return df, latest_name
+        except Exception:
+            pass
+
+    return None, "未检测到商品库"
 
 
 def get_sku_info_from_df(sku: str, df: Optional[pd.DataFrame], sku_mapping: Optional[Dict[str, str]] = None) -> dict:
@@ -242,7 +257,7 @@ def extract_warehouse_from_text(text: str) -> str:
 
 
 # ==============================================================================
-# 3. 分隔页绘制与面单重排处理
+# 3. 分隔页绘制与面单重排
 # ==============================================================================
 
 def add_sku_label_page(
@@ -352,7 +367,7 @@ def process_single_pdf_bytes(
 
 
 # ==============================================================================
-# 4. Streamlit 主页面
+# 4. Streamlit 页面与操作流
 # ==============================================================================
 
 def main():
@@ -363,47 +378,45 @@ def main():
         st.session_state["sku_mapping"] = load_sku_mapping()
     current_mapping = st.session_state["sku_mapping"]
 
-    # 2. 定位商品库文件与胶囊文案
-    auto_commodities = find_latest_commodities_file(".")
-    custom_uploaded = st.session_state.get("custom_commodities", None)
+    # 2. 自动解密加载商品库
+    active_df, table_label = load_active_commodities()
 
+    # 状态指示
+    custom_uploaded = st.session_state.get("custom_commodities", None)
     if custom_uploaded is not None:
         table_pill_label = f"🟢 自定义: {custom_uploaded.name} ▾"
-    elif auto_commodities:
-        table_pill_label = f"🟢 {auto_commodities['filename']} ▾"
+    elif active_df is not None:
+        table_pill_label = f"🟢 {table_label} ▾"
     else:
-        table_pill_label = "🔴 未检测到商品库 (点击上传) ▾"
+        table_pill_label = f"🔴 {table_label} ▾"
 
     map_count = len(current_mapping)
     mapping_pill_label = f"⚡ 特殊映射 ({map_count}条) ▾" if map_count > 0 else "⚡ 特殊映射 ▾"
 
-    # 3. 顶部并排双胶囊弹窗
+    # 3. 顶部并排双极简胶囊
     col_p1, col_p2, _ = st.columns([1.5, 1.2, 1.3])
 
     with col_p1:
         with st.popover(table_pill_label):
-            st.caption("如需临时覆盖或更换商品库，请在此上传：")
+            st.caption("临时更换商品库（仅本次生效）：")
             custom_file = st.file_uploader(
                 "上传替代商品列表",
                 type=["xlsx", "xls", "csv"],
                 label_visibility="collapsed",
                 key="custom_commodities"
             )
-            if custom_uploaded is not None and st.button("恢复默认表格", use_container_width=True):
+            if custom_uploaded is not None and st.button("恢复默认商品库", use_container_width=True):
                 del st.session_state["custom_commodities"]
                 st.rerun()
 
     with col_p2:
         with st.popover(mapping_pill_label):
-            st.caption("双击单元格输入，支持从 Excel 复制两列直接粘贴：")
-
-            # 准备表格数据源（至少保留一行空白行方便直接点击输入）
+            st.caption("双击编辑，支持从 Excel 复制两列直接粘贴：")
             rows = [{"面单SKU": k, "商品库SKU": v} for k, v in current_mapping.items()]
             if not rows:
                 rows = [{"面单SKU": "", "商品库SKU": ""}]
             df_mapping = pd.DataFrame(rows)
 
-            # 核心：Excel 风格的可编辑表格组件
             edited_df = st.data_editor(
                 df_mapping,
                 num_rows="dynamic",
@@ -411,18 +424,10 @@ def main():
                 hide_index=True,
                 height=220,
                 column_config={
-                    "面单SKU": st.column_config.TextColumn(
-                        "面单 SKU",
-                        help="面单上打印的原始SKU",
-                        required=True
-                    ),
-                    "商品库SKU": st.column_config.TextColumn(
-                        "商品库 SKU",
-                        help="商品库表格中对应的真实SKU",
-                        required=True
-                    )
+                    "面单SKU": st.column_config.TextColumn("面单 SKU", required=True),
+                    "商品库SKU": st.column_config.TextColumn("商品库 SKU", required=True)
                 },
-                key="sku_mapping_table_editor"
+                key="sku_mapping_editor"
             )
 
             c_btn1, c_btn2 = st.columns(2)
@@ -442,14 +447,11 @@ def main():
                 save_sku_mapping({})
                 st.rerun()
 
-    # 4. 判定生效的商品库
-    active_df = None
+    # 4. 判定最终使用的商品库
     if custom_uploaded is not None:
-        active_df = load_commodities_df(custom_uploaded)
-    elif auto_commodities:
-        active_df = load_commodities_df(auto_commodities["path"])
+        active_df = parse_raw_table_bytes(custom_uploaded.getvalue())
 
-    # 5. 主操作区：批量面单拖拽
+    # 5. 面单批量上传
     uploaded_pdfs = st.file_uploader(
         "拖拽或点击上传一个或多个亚马逊面单 PDF",
         type=["pdf"],
@@ -505,7 +507,7 @@ def main():
             status_txt.empty()
 
             if processed_results:
-                # 醒目的单/多文件下载按钮
+                # 醒目的下载按钮
                 if num_files == 1:
                     single = processed_results[0]
                     st.download_button(
@@ -550,7 +552,6 @@ def main():
                         display_cols = [c for c in cols if c in df_display.columns]
                         st.dataframe(df_display[display_cols], use_container_width=True, hide_index=True)
 
-                # 多文件独立单面单下载展开框
                 if num_files > 1:
                     with st.expander("📄 展开单独下载某个面单"):
                         for item in processed_results:
