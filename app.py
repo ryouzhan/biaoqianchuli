@@ -1,32 +1,31 @@
-@@ -1,568 +1,226 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 亚马逊外箱面单自动化处理 - 密文云端同步 + 极简纯净版
 """
 
 import os
-
 import re
-
-
-
+import io
+import json
+import zipfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
 
+import pandas as pd
 import streamlit as st
-
 from cryptography.fernet import Fernet
 
 # 双兼容导入 PDF 读写库
 try:
     from pypdf import PdfReader, PdfWriter
-
+except Exception:
     from PyPDF2 import PdfReader, PdfWriter
 
-
+from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 
 # ==============================================================================
@@ -46,8 +45,6 @@ footer {visibility: hidden;}
 
 .block-container {
     padding-top: 2.2rem;
-
-
 }
 
 div[data-testid="stPopover"] > button {
@@ -56,19 +53,15 @@ div[data-testid="stPopover"] > button {
     font-size: 0.82rem !important;
     background: rgba(255, 255, 255, 0.05) !important;
     border: 1px solid rgba(255, 255, 255, 0.12) !important;
-
     height: auto !important;
     margin-top: 2px !important;
     margin-bottom: 16px !important;
-
     align-items: center !important;
     transition: all 0.2s ease;
 }
 
-
+div[data-testid="stPopover"] > button:hover {
     border-color: rgba(255, 255, 255, 0.28) !important;
-
-
 }
 
 div[data-testid="stPopover"] > button:focus {
@@ -80,17 +73,20 @@ div[data-testid="stPopoverBody"] {
     max-width: 440px !important;
 }
 </style>
+""", unsafe_allow_html=True)
 
 
 DEFAULT_FONT = "Helvetica"
 
-
-
-
-
+FONT_SEARCH_PATHS = [
+    # Windows
     r"C:\Windows\Fonts\simhei.ttf",
     r"C:\Windows\Fonts\msyh.ttc",
-
+    r"C:\Windows\Fonts\simsun.ttc",
+    # Linux (Streamlit Cloud / Codespaces)
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
 ]
 
 for fpath in FONT_SEARCH_PATHS:
@@ -98,7 +94,7 @@ for fpath in FONT_SEARCH_PATHS:
         try:
             pdfmetrics.registerFont(TTFont("ChineseFont", fpath))
             DEFAULT_FONT = "ChineseFont"
-
+            break
         except Exception:
             pass
 
@@ -110,16 +106,16 @@ MAPPING_FILE = "sku_mapping.json"
 
 def load_sku_mapping() -> Dict[str, str]:
     if os.path.exists(MAPPING_FILE):
-
+        try:
             with open(MAPPING_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
-
+            pass
     return {}
 
 def save_sku_mapping(mapping: Dict[str, str]) -> None:
     try:
-
+        with open(MAPPING_FILE, "w", encoding="utf-8") as f:
             json.dump(mapping, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
@@ -131,21 +127,27 @@ def save_sku_mapping(mapping: Dict[str, str]) -> None:
 
 def get_secret_key() -> Optional[bytes]:
     """获取解密密钥：优先 Streamlit Secrets，其次本地 secret.key"""
+    # 优先从 Streamlit Secrets 读取
     if hasattr(st, "secrets") and "COMMODITIES_KEY" in st.secrets:
+        key = st.secrets["COMMODITIES_KEY"]
+        if key:
+            return key.encode("utf-8")
 
+    # 备选：本地 secret.key 文件（本地单机测试用）
     if os.path.exists("secret.key"):
         try:
+            with open("secret.key", "rb") as f:
+                return f.read().strip()
+        except Exception:
+            pass
 
-
-
-
-
+    return None
 
 
 def parse_raw_table_bytes(raw_bytes: bytes) -> Optional[pd.DataFrame]:
     """从二进制字节流自动识别 Excel 或 CSV 并转为 DataFrame"""
-
-        # Excel .xlsx 标准 zip 头魔数
+    try:
+        # Excel .xlsx 标准 zip 头魔数 / .xls OLE 头
         if raw_bytes.startswith(b"PK\x03\x04") or raw_bytes.startswith(b"\xd0\xcf\x11\xe0"):
             return pd.read_excel(io.BytesIO(raw_bytes))
         else:
@@ -191,7 +193,7 @@ def load_active_commodities() -> Tuple[Optional[pd.DataFrame], str]:
             candidates.append((full_path, fname, os.path.getmtime(full_path)))
 
     if candidates:
-        candidates.sort(key=lambda x: x, reverse=True)
+        candidates.sort(key=lambda x: x[2], reverse=True)
         latest_path, latest_name, _ = candidates[0]
         try:
             with open(latest_path, "rb") as f:
@@ -555,14 +557,14 @@ def main():
 
                 if num_files > 1:
                     with st.expander("📄 展开单独下载某个面单"):
-
+                        for item in processed_results:
                             st.download_button(
                                 label=f"下载 {item['filename']} ({item['summary']['output_pages']} 页)",
                                 data=item["bytes"],
                                 file_name=item["filename"],
                                 mime="application/pdf",
-
                             )
 
 
 if __name__ == "__main__":
+    main()
